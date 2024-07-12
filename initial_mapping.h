@@ -1,6 +1,6 @@
 
-#include <utility>                   // for std::pair
-#include <algorithm>                 // for std::for_each
+#include <utility>                   
+#include <algorithm>                
 #include <queue>
 #include <bitset>
 #include <boost/graph/undirected_graph.hpp>
@@ -13,15 +13,13 @@
 using namespace std;
 const float ROUNDING_ERROR_f32 = 0.000001f;
 
-//! returns if a equals b, taking possible rounding errors into account
 inline bool equals(const float a, const float b, const float tolerance = ROUNDING_ERROR_f32);
 
 
 class ChipTopology{
 private:
-    /* data */
 public:
-    ChipTopology();  // const std::string filename
+    ChipTopology();  
     ~ChipTopology();
     pair<std::vector<int>, float> shortest_path_AG(int source, int destination) {std::vector<int> tmp; tmp.push_back(0); tmp.push_back(1);return make_pair(tmp,1.0);};
     std::vector<std::vector<pair<std::vector<int>, float>>> shortest_path_AG_map;
@@ -39,7 +37,6 @@ struct CircuitGate{
     std::vector<float> experssion_list;
 };
 
-// start from transform this to class to see if it works
 class QubitData{
 public:
   std::string vertex_name;
@@ -77,10 +74,8 @@ class EdgeData{
   double dist;
 };
 
-// can we insert class instead of struct  //change to bidirectedS
 class CircuitGraph:public boost::adjacency_list<boost::vecS, boost::vecS, boost::bidirectionalS, BinaryGate, EdgeData>{
  private:
-    /* data */
  public:
     CircuitGraph(ChipTopology* AG, std::vector<CircuitGate> circuit_gate_list);
     ~CircuitGraph();
