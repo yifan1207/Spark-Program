@@ -1,150 +1,125 @@
-#include "initial_mapping.h"
+#include "airbridge_diagnose.h"
+#include <opencv2/opencv.hpp>
+#include <map>
+#include <vector>
+#include <string>
+#include <iostream>
 
-double Initial_Mapping::ALPHA = 0.55;
-double Initial_Mapping::BETA = 4;
-double Initial_Mapping::GAMMA = 1;
+// Structure representing a bridge sample
+struct BridgeSamples {
+    cv::Mat image;
+    int group_index;
+    cv::Point pt1;
+    cv::Point pt2;
+};
 
-Initial_Mapping::Initial_Mapping(CircuitGraph *CG, ChipTopology *AG) {
-    m_best_map_available = false;
-    CANDI.resize(CG->num_qubit_logical);
-    CANDI[0] = AG->num_qubit;
-    CANDI[1] = 4;
-    for(int i = 2; i < min(8, CG->num_qubit_logical); i++) CANDI[i] = 2;
-    for(int i = 8; i < CG->num_qubit_logical; i++) CANDI[i] = 1;
+class AirbridgeDiagnose {
+public:
+    void diag(const std::map<int, cv::Mat>& images, const std::vector<BridgeSamples*>& bridge_samples);
+};
 
-    this->m_p_CG = CG;
-    this->m_p_AG = AG;
-}
+void AirbridgeDiagnose::diag(const std::map<int, cv::Mat>& images, const std::vector<BridgeSamples*>& bridge_samples)
+{
+    std::cout << bridge_samples.size() << " bridge samples need to be processed." << std::endl;
 
-void Initial_Mapping::compute_initial_mapping() {
-    // get depth & degree
-    std::vector<int> depth;
-    std::vector<double> weight;
-    depth.resize(m_p_CG->node_cnt);
-    m_tmp_in_degree.resize(m_p_CG->node_cnt);
-    for(int i = 0, v; i < m_p_CG->node_cnt; i++) {
-        m_tmp_in_degree[i] = boost::in_degree(this->m_p_CG->vertex_set()[i], *this->m_p_CG);
-        if(!m_tmp_in_degree[i]) m_tmp_front_layer.push_back(i); 
-        for (auto e: boost::make_iterator_range(boost::out_edges(m_p_CG->vertex_set()[i], *this->m_p_CG))) {
-            v = boost::target(e, *this->m_p_CG);
-            depth[v] = std::max(depth[v], depth[i] + 1);
+    const int thickness = 1;
+    constexpr int SAMPLE_LINE_LENGTH = 49;
+    constexpr int REQUIRED_HEIGHT = 4;
+    constexpr int ACCUMULATION_ROW_INDEX = 1;
+    const cv::Scalar RECTANGLE_COLOR_GREEN(0, 255, 0);
+
+    std::vector<cv::Vec3d> accumulated_data(SAMPLE_LINE_LENGTH, cv::Vec3d(0, 0, 0));
+    int sample_index = 0;
+
+    for (const auto& sample : bridge_samples)
+    {
+        if (!sample || sample->image.empty()) {
+            std::cerr << "Warning: Encountered a null or empty sample. Skipping." << std::endl;
+            continue;
+        }
+
+        std::string sample_filename = "samples/sample" + std::to_string(++sample_index) + ".png";
+        if (!cv::imwrite(sample_filename, sample->image)) {
+            std::cerr << "Error: Failed to write image " << sample_filename << std::endl;
+            continue;
+        }
+
+        const cv::Size image_size = sample->image.size();
+        if (image_size.width != SAMPLE_LINE_LENGTH || image_size.height != REQUIRED_HEIGHT) {
+            std::cerr << "Warning: Sample " << sample_index << " has invalid dimensions (" 
+                      << image_size.width << "x" << image_size.height << "). Skipping accumulation." << std::endl;
+            continue;
+        }
+
+        for (int i = 0; i < SAMPLE_LINE_LENGTH; ++i) {
+            const cv::Vec3b& pixel = sample->image.at<cv::Vec3b>(ACCUMULATION_ROW_INDEX, i);
+            accumulated_data[i][0] += static_cast<double>(pixel[0]);
+            accumulated_data[i][1] += static_cast<double>(pixel[1]);
+            accumulated_data[i][2] += static_cast<double>(pixel[2]);
         }
     }
-    // get weight
-    std::vector<int> pw;
-    pw.resize(m_p_CG->node_cnt);
-    pw[0] = 1e6;
-    for(int i = 1; i < m_p_CG->node_cnt; i++) pw[i] = pw[i-1] * ALPHA;
-    weight.resize(m_p_CG->num_qubit_logical);
-    for(int x = 0; x < m_p_CG->num_qubit_logical; x++) {
-        for(auto v: m_p_CG->gate_for_qubit[x]) {
-            weight[x] += pw[depth[v]];
-        }
-    }
-    // for(int x = 0; x < CG->num_qubit_logical; x++) std::cerr << weight[x] << " "; std::cerr << "weight\n";
-    // get rank
-    m_tmp_c.resize(m_p_CG->num_qubit_logical);
-    for(int i = 0; i < m_p_CG->num_qubit_logical; i++) m_tmp_c[i] = i; 
-    sort(m_tmp_c.begin(), m_tmp_c.end(), [&](int a, int b) {
-        return weight[a] > weight[b];
-    });
-    // for(int x = 0; x < CG->num_qubit_logical; x++) std::cerr << c[x] << " "; std::cerr << "rank\n";
 
-    // dfs
-    m_tmp_valid.resize(m_p_AG->num_qubit);
-    m_tmp_log_to_phy.resize(m_p_AG->num_qubit);
-    m_tmp_phy_to_log.resize(m_p_AG->num_qubit);
-    m_best_map.resize(m_p_AG->num_qubit);
-    m_tmp_que.resize(m_p_CG->num_qubit_logical);
-    for(int i = 0; i < m_p_AG->num_qubit; i++) {
-        m_tmp_valid[i] = 1;
-        m_best_map[i] = m_tmp_log_to_phy[i] = m_tmp_phy_to_log[i] = i;
-    }
-    m_best_h = cost_h();
-    for(int i = 0; i < m_p_AG->num_qubit; i++) m_tmp_valid[i] = 0;
-    dfs(0);
-}
-
-std::vector<int> Initial_Mapping::get_initial_mapping(){
-    if(!m_best_map_available) {
-        compute_initial_mapping();
-        m_best_map_available = true;
-    }
-    return m_best_map;
-}
-
-void Initial_Mapping::update() {
-    double ret = cost_h();
-    if(ret > m_best_h) {
-        m_best_h = ret;
-        m_best_map = m_tmp_log_to_phy;
-    }
-}
-
-void Initial_Mapping::swap_map(int x, int y) { // logical
-    if(x == y) return;
-    swap(m_tmp_log_to_phy[x], m_tmp_log_to_phy[y]);
-    m_tmp_phy_to_log[m_tmp_log_to_phy[x]] = x;
-    m_tmp_phy_to_log[m_tmp_log_to_phy[y]] = y;
-}
-
-std::vector<int> Initial_Mapping::find_exe_gate(){
-    std::vector<int> exe_gate, trash;
-    queue<int> q;
-    for(auto x: m_tmp_front_layer) q.push(x);
-    while(!q.empty()) {
-        int x = q.front(), v; q.pop();
-        int q_from = m_tmp_log_to_phy[boost::get(&BinaryGate::m_fromqubit, *this->m_p_CG)[x]];
-        int q_to = m_tmp_log_to_phy[boost::get(&BinaryGate::m_toqubit, *this->m_p_CG)[x]];
-        if(!m_tmp_valid[q_from] || !m_tmp_valid[q_to] || m_p_AG->shortest_path_AG(q_from, q_to).first.size() != 2) continue;
-        exe_gate.push_back(x);
-        for (auto e : boost::make_iterator_range(boost::out_edges(m_p_CG->vertex_set()[x], *this->m_p_CG))) {
-            v = boost::target(e, *this->m_p_CG);
-            --m_tmp_in_degree[v];
-            trash.push_back(v);
-            if(!m_tmp_in_degree[v]) q.push(v);
-        }
-    }
-    for(auto x: trash) ++m_tmp_in_degree[x];
-    return exe_gate;
-}
-
-double Initial_Mapping::cost_h() {
-    double pw, ret = 1.0 * (signed)find_exe_gate().size() * (m_p_AG->num_qubit) * BETA;
-    for(int x = 0, q_from, q_to; x < m_p_CG->num_qubit_logical; x++) {
-        pw = 1;
-        for(auto y: m_p_CG->gate_for_qubit[x]){
-            q_from = m_tmp_log_to_phy[boost::get(&BinaryGate::m_fromqubit, *this->m_p_CG)[y]];
-            q_to = m_tmp_log_to_phy[boost::get(&BinaryGate::m_toqubit, *this->m_p_CG)[y]];
-            ret += pw * (GAMMA - ((!m_tmp_valid[q_from] || !m_tmp_valid[q_to]) ? m_p_AG->diameter : ((signed)m_p_AG->shortest_path_AG(q_from, q_to).first.size() - 1)));
-            pw *= ALPHA;
-            if(pw < 1e-6) break;
-        }
-    }
-    return ret;
-}
-
-void Initial_Mapping::dfs(int pos) {
-    if(pos == m_p_CG->num_qubit_logical) {
-        update();
+    const size_t valid_sample_count = bridge_samples.size();
+    if (valid_sample_count == 0) {
+        std::cerr << "Error: No valid bridge samples to process." << std::endl;
         return;
     }
-    for(int i = 0; i < m_p_AG->num_qubit; i++) if(!m_tmp_valid[i]) {
-        swap_map(m_tmp_c[pos], m_tmp_phy_to_log[i]);
-        m_tmp_valid[i] = 1;
-        m_tmp_que[pos].push(make_pair(-cost_h(), i));
-        while((signed)m_tmp_que[pos].size() > CANDI[pos]) m_tmp_que[pos].pop();
-        m_tmp_valid[i] = 0;
-    }
-    while(!m_tmp_que[pos].empty()){
-        int x = m_tmp_que[pos].top().second; m_tmp_que[pos].pop();
-        swap_map(m_tmp_c[pos], m_tmp_phy_to_log[x]);
-        m_tmp_valid[x]=1;
-        dfs(pos+1);
-        m_tmp_valid[x]=0;
-    }
-}
 
-int main() {
-    return 0;
+    for (auto& pixel_sum : accumulated_data) {
+        pixel_sum[0] /= static_cast<double>(valid_sample_count);
+        pixel_sum[1] /= static_cast<double>(valid_sample_count);
+        pixel_sum[2] /= static_cast<double>(valid_sample_count);
+    }
+
+    for (const auto& sample : bridge_samples)
+    {
+        if (!sample || images.find(sample->group_index) == images.end()) {
+            std::cerr << "Warning: Sample or corresponding image not found. Skipping." << std::endl;
+            continue;
+        }
+
+        const cv::Mat& target_image = images.at(sample->group_index);
+        cv::Mat annotated_image = target_image.clone();
+
+        const cv::Size image_size = sample->image.size();
+        if (image_size.width != SAMPLE_LINE_LENGTH || image_size.height != REQUIRED_HEIGHT) {
+            cv::rectangle(annotated_image, sample->pt1, sample->pt2, RECTANGLE_COLOR_GREEN, thickness);
+        }
+        else {
+            cv::Vec3i variance(0, 0, 0);
+            for (int i = 0; i < SAMPLE_LINE_LENGTH; ++i) {
+                const cv::Vec3b& pixel = sample->image.at<cv::Vec3b>(ACCUMULATION_ROW_INDEX, i);
+                for (int c = 0; c < 3; ++c) {
+                    uchar diff = (pixel[c] > accumulated_data[i][c] + 2) ? pixel[c] - static_cast<uchar>(accumulated_data[i][c]) : 0;
+                    variance[c] += diff;
+                }
+            }
+
+            variance[0] /= SAMPLE_LINE_LENGTH;
+            variance[1] /= SAMPLE_LINE_LENGTH;
+            variance[2] /= SAMPLE_LINE_LENGTH;
+
+            std::cout << "Sample Variance - R: " << variance[2]
+                      << ", G: " << variance[1]
+                      << ", B: " << variance[0] << std::endl;
+
+            cv::Scalar error_color(
+                std::max(0, 255 - variance[2]),
+                std::max(0, 255 - variance[1]),
+                std::max(0, 255 - variance[0])
+            );
+
+            cv::rectangle(annotated_image, sample->pt1, sample->pt2, error_color, cv::FILLED);
+        }
+
+        const_cast<std::map<int, cv::Mat>&>(images).at(sample->group_index) = annotated_image;
+    }
+
+    for (const auto& [group_index, annotated_image] : images)
+    {
+        std::string result_filename = "result" + std::to_string(group_index) + ".png";
+        if (!cv::imwrite(result_filename, annotated_image)) {
+            std::cerr << "Error: Failed to write annotated image " << result_filename << std::endl;
+        }
+    }
 }
